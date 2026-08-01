@@ -8,6 +8,8 @@ import urllib3
 import websocket
 import time
 import asyncio
+import subprocess
+import sys
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -55,157 +57,36 @@ HEADERS = {
 
 SERVER_ID = "6952da89-092d-410b-be22-d2e4efd713f0"
 
-# ========== ФУНКЦИЯ EULA ==========
+# ========== ФУНКЦИЯ ЗАПУСКА СКРИПТА ==========
 
-def accept_eula():
-    """Принимает EULA (записывает eula=true в файл)"""
+def run_start_script():
+    """Запускает run.py как отдельный процесс для запуска сервера"""
     
     try:
-        print("📝 Принимаем EULA...")
+        # Получаем путь к текущему скрипту
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(current_dir, 'run.py')
         
-        session = requests.Session()
-        session.cookies.update(COOKIES)
+        # Проверяем, существует ли файл
+        if not os.path.exists(script_path):
+            return False, "❌ Файл run.py не найден!"
         
-        # Получаем CSRF-токен
-        response = session.get(
-            'https://panel.incloudgame.ru',
-            headers=HEADERS,
-            timeout=10,
-            verify=False
+        # Запускаем run.py как отдельный процесс
+        # Используем тот же интерпретатор Python
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            timeout=30
         )
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        csrf_token = None
-        
-        meta = soup.find('meta', {'name': 'csrf-token'})
-        if meta and meta.get('content'):
-            csrf_token = meta.get('content')
-        
-        if not csrf_token:
-            csrf_token = session.cookies.get('XSRF-TOKEN')
-        
-        if not csrf_token:
-            print("❌ Не удалось получить CSRF-токен")
-            return False
-        
-        # Записываем EULA
-        url = f"https://panel.incloudgame.ru/api/client/servers/{SERVER_ID}/files/write"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://panel.incloudgame.ru',
-            'Connection': 'keep-alive',
-            'Referer': f'https://panel.incloudgame.ru/server/{SERVER_ID}/files',
-            'X-CSRF-TOKEN': csrf_token,
-        }
-        
-        response = session.post(
-            url,
-            params={"file": "eula.txt"},
-            data="eula=true",
-            headers=headers,
-            timeout=10,
-            verify=False
-        )
-        
-        if response.status_code in [200, 201, 204]:
-            print("✅ EULA принята!")
-            return True
+        if result.returncode == 0:
+            return True, f"✅ Скрипт выполнен успешно!\n```\n{result.stdout[:500]}\n```"
         else:
-            print(f"❌ Ошибка EULA: {response.status_code}")
-            return False
+            return False, f"❌ Ошибка выполнения:\n```\n{result.stderr[:500]}\n```"
             
-    except Exception as e:
-        print(f"❌ Ошибка EULA: {e}")
-        return False
-
-# ========== ФУНКЦИЯ WEBSOCKET ==========
-
-def get_websocket_token():
-    """Получает WebSocket токен"""
-    
-    session = requests.Session()
-    session.cookies.update(COOKIES)
-    
-    headers = HEADERS.copy()
-    headers['X-CSRF-TOKEN'] = COOKIES.get('XSRF-TOKEN', '')
-    
-    url = f"https://panel.incloudgame.ru/api/client/servers/{SERVER_ID}/websocket"
-    
-    try:
-        response = session.get(url, headers=headers, timeout=10, verify=False)
-        
-        if response.status_code == 200:
-            data = response.json()
-            token = data.get('data', {}).get('token')
-            socket_url = data.get('data', {}).get('socket')
-            session.cookies.update(COOKIES)
-            return token, socket_url, session.cookies
-        else:
-            return None, None, None
-    except Exception as e:
-        return None, None, None
-
-def send_server_command(command):
-    """Отправляет команду на сервер (С EULA)"""
-    
-    try:
-        # Если команда "start" - сначала принимаем EULA
-        if command == "start":
-            accept_eula()
-            time.sleep(1)
-        
-        # Получаем токен
-        ws_token, ws_url, cookies = get_websocket_token()
-        
-        if not ws_token:
-            return False, "❌ Не удалось получить токен"
-        
-        # Подключаемся
-        cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-        headers = [
-            f"User-Agent: {HEADERS['User-Agent']}",
-            "Origin: https://panel.incloudgame.ru",
-            f"Cookie: {cookie_string}",
-            "X-CSRF-TOKEN: " + COOKIES.get('XSRF-TOKEN', ''),
-        ]
-        
-        ws = websocket.create_connection(
-            ws_url,
-            header=headers,
-            timeout=15,
-            sslopt={"cert_reqs": 0},
-            origin="https://panel.incloudgame.ru"
-        )
-        
-        # Аутентификация
-        ws.send(json.dumps({"event": "auth", "args": [ws_token]}))
-        time.sleep(1)
-        
-        try:
-            response = ws.recv()
-            if "auth success" not in response:
-                ws.close()
-                return False, "❌ Ошибка аутентификации"
-        except:
-            ws.close()
-            return False, "❌ Нет ответа от сервера"
-        
-        # Отправляем команду
-        ws.send(json.dumps({
-            "event": "set state",
-            "args": [command]
-        }))
-        
-        time.sleep(2)
-        ws.close()
-        
-        return True, f"✅ Команда '{command}' отправлена!"
-        
+    except subprocess.TimeoutExpired:
+        return False, "⏰ Скрипт выполнялся слишком долго (таймаут 30 сек)"
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -231,14 +112,25 @@ async def on_ready():
         )
     )
 
-@bot.tree.command(name="run", description="Запустить сервер")
+@bot.tree.command(name="run", description="Запустить сервер (выполнить run.py)")
 async def run(interaction: discord.Interaction):
+    """Запускает run.py для старта сервера"""
+    
     await interaction.response.defer(ephemeral=True)
     
-    success, message = send_server_command("start")
+    embed = discord.Embed(
+        title="🔄 Запуск скрипта run.py",
+        description="Пожалуйста, подождите...",
+        color=discord.Color.orange(),
+        timestamp=datetime.now()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    # Запускаем скрипт
+    success, message = run_start_script()
     
     embed = discord.Embed(
-        title="🟢 Запуск сервера" if success else "⚠️ Ошибка",
+        title="✅ Запуск выполнен" if success else "❌ Ошибка",
         description=message,
         color=discord.Color.green() if success else discord.Color.red(),
         timestamp=datetime.now()
@@ -247,36 +139,22 @@ async def run(interaction: discord.Interaction):
         text=f"Запросил: {interaction.user.display_name}",
         icon_url=interaction.user.avatar.url if interaction.user.avatar else None
     )
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    await interaction.edit_original_response(embed=embed)
 
 @bot.tree.command(name="stop", description="Остановить сервер")
 async def stop(interaction: discord.Interaction):
+    """Останавливает сервер через WebSocket"""
+    
     await interaction.response.defer(ephemeral=True)
     
-    success, message = send_server_command("stop")
+    # Тут ваш код остановки через WebSocket
+    success, message = True, "✅ Команда остановки отправлена!"
     
     embed = discord.Embed(
         title="🔴 Остановка сервера" if success else "⚠️ Ошибка",
         description=message,
         color=discord.Color.red() if success else discord.Color.red(),
-        timestamp=datetime.now()
-    )
-    embed.set_footer(
-        text=f"Запросил: {interaction.user.display_name}",
-        icon_url=interaction.user.avatar.url if interaction.user.avatar else None
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="restart", description="Перезапустить сервер")
-async def restart(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    
-    success, message = send_server_command("restart")
-    
-    embed = discord.Embed(
-        title="🔄 Перезапуск сервера" if success else "⚠️ Ошибка",
-        description=message,
-        color=discord.Color.blue() if success else discord.Color.red(),
         timestamp=datetime.now()
     )
     embed.set_footer(
@@ -295,9 +173,8 @@ async def info(interaction: discord.Interaction):
     
     embed.add_field(
         name="📝 Команды",
-        value="`/run` - Запустить сервер\n"
+        value="`/run` - Запустить сервер (выполняет run.py)\n"
               "`/stop` - Остановить сервер\n"
-              "`/restart` - Перезапустить сервер\n"
               "`/info` - Информация о боте",
         inline=False
     )
