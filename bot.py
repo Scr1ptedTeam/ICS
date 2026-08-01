@@ -8,6 +8,7 @@ import urllib3
 import websocket
 import time
 import asyncio
+import threading
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -55,14 +56,21 @@ HEADERS = {
 
 SERVER_ID = "6952da89-092d-410b-be22-d2e4efd713f0"
 
-# ========== ФУНКЦИИ ДЛЯ ЗАПУСКА СЕРВЕРА ==========
+# ========== ФУНКЦИИ С ЛОГАМИ ==========
+
+def log_message(msg):
+    """Выводит сообщение с временем в консоль"""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 def accept_eula():
-    """Принимает EULA"""
+    """Принимает EULA с логами"""
     try:
+        log_message("📝 Начинаем принятие EULA...")
+        
         session = requests.Session()
         session.cookies.update(COOKIES)
         
+        log_message("🔄 Получаем CSRF-токен...")
         response = session.get('https://panel.incloudgame.ru', headers=HEADERS, timeout=10, verify=False)
         soup = BeautifulSoup(response.text, 'html.parser')
         csrf_token = None
@@ -70,11 +78,15 @@ def accept_eula():
         meta = soup.find('meta', {'name': 'csrf-token'})
         if meta and meta.get('content'):
             csrf_token = meta.get('content')
+            log_message(f"✅ CSRF-токен получен из meta: {csrf_token[:20]}...")
         
         if not csrf_token:
             csrf_token = session.cookies.get('XSRF-TOKEN')
+            if csrf_token:
+                log_message(f"✅ CSRF-токен получен из кук: {csrf_token[:20]}...")
         
         if not csrf_token:
+            log_message("❌ Не удалось получить CSRF-токен")
             return False
         
         headers = {
@@ -85,6 +97,7 @@ def accept_eula():
             'Referer': f'https://panel.incloudgame.ru/server/{SERVER_ID}/files',
         }
         
+        log_message(f"📤 Отправка EULA на сервер...")
         response = session.post(
             f'https://panel.incloudgame.ru/api/client/servers/{SERVER_ID}/files/write',
             params={"file": "eula.txt"},
@@ -94,12 +107,20 @@ def accept_eula():
             verify=False
         )
         
-        return response.status_code in [200, 201, 204]
-    except:
+        if response.status_code in [200, 201, 204]:
+            log_message("✅ EULA принята успешно!")
+            return True
+        else:
+            log_message(f"❌ Ошибка EULA: {response.status_code}")
+            return False
+    except Exception as e:
+        log_message(f"❌ Ошибка EULA: {e}")
         return False
 
 def get_websocket_token():
-    """Получает WebSocket токен"""
+    """Получает WebSocket токен с логами"""
+    log_message("🔄 Получаем WebSocket токен...")
+    
     session = requests.Session()
     session.cookies.update(COOKIES)
     
@@ -114,26 +135,37 @@ def get_websocket_token():
             verify=False
         )
         
+        log_message(f"📊 Статус ответа: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
             token = data.get('data', {}).get('token')
             socket_url = data.get('data', {}).get('socket')
             session.cookies.update(COOKIES)
+            log_message(f"✅ Токен получен! URL: {socket_url[:50]}...")
             return token, socket_url, session.cookies
-        return None, None, None
-    except:
+        else:
+            log_message(f"❌ Ошибка получения токена: {response.status_code}")
+            return None, None, None
+    except Exception as e:
+        log_message(f"❌ Ошибка: {e}")
         return None, None, None
 
 def send_server_command(command):
-    """Отправляет команду на сервер (работает как в Thonny)"""
+    """Отправляет команду на сервер с логами"""
+    
+    log_message(f"🚀 Отправка команды: {command}")
     
     try:
         if command == "start":
-            accept_eula()
+            log_message("📌 Команда START - проверяем EULA...")
+            if not accept_eula():
+                log_message("⚠️ EULA не принята, но продолжаем...")
             time.sleep(1)
         
         ws_token, ws_url, cookies = get_websocket_token()
         if not ws_token:
+            log_message("❌ Не удалось получить токен")
             return False, "❌ Не удалось получить токен"
         
         cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
@@ -144,6 +176,7 @@ def send_server_command(command):
             "X-CSRF-TOKEN: " + COOKIES.get('XSRF-TOKEN', ''),
         ]
         
+        log_message("🔗 Подключаемся к WebSocket...")
         ws = websocket.create_connection(
             ws_url,
             header=headers,
@@ -151,19 +184,26 @@ def send_server_command(command):
             sslopt={"cert_reqs": 0},
             origin="https://panel.incloudgame.ru"
         )
+        log_message("✅ WebSocket подключен!")
         
+        log_message("🔑 Отправляем аутентификацию...")
         ws.send(json.dumps({"event": "auth", "args": [ws_token]}))
         time.sleep(1)
         
         try:
             response = ws.recv()
+            log_message(f"📥 Ответ аутентификации: {response}")
             if "auth success" not in response:
                 ws.close()
+                log_message("❌ Ошибка аутентификации")
                 return False, "❌ Ошибка аутентификации"
-        except:
+            log_message("✅ Аутентификация успешна!")
+        except Exception as e:
             ws.close()
+            log_message(f"❌ Нет ответа: {e}")
             return False, "❌ Нет ответа от сервера"
         
+        log_message(f"📤 Отправляем команду: {command}")
         ws.send(json.dumps({
             "event": "set state",
             "args": [command]
@@ -171,26 +211,28 @@ def send_server_command(command):
         
         time.sleep(2)
         ws.close()
+        log_message("✅ Соединение закрыто")
         
         return True, f"✅ Команда '{command}' отправлена!"
         
     except Exception as e:
+        log_message(f"❌ Ошибка: {e}")
         return False, f"❌ Ошибка: {str(e)}"
 
 # ==================== КОМАНДЫ БОТА ====================
 
 @bot.event
 async def on_ready():
-    print(f'✅ Бот запущен!')
-    print(f'📌 Имя: {bot.user.name}')
-    print(f'🆔 ID: {bot.user.id}')
-    print(f'👥 На серверах: {len(bot.guilds)}')
+    log_message(f'✅ Бот запущен!')
+    log_message(f'📌 Имя: {bot.user.name}')
+    log_message(f'🆔 ID: {bot.user.id}')
+    log_message(f'👥 На серверах: {len(bot.guilds)}')
     
     try:
         synced = await bot.tree.sync()
-        print(f'✅ Синхронизировано {len(synced)} команд')
+        log_message(f'✅ Синхронизировано {len(synced)} команд')
     except Exception as e:
-        print(f'❌ Ошибка синхронизации: {e}')
+        log_message(f'❌ Ошибка синхронизации: {e}')
     
     await bot.change_presence(
         activity=discord.Activity(
@@ -199,22 +241,32 @@ async def on_ready():
         )
     )
 
+# ========== ЗАПУСК В ОТДЕЛЬНОМ ПОТОКЕ ==========
+
+def run_server_command_sync(command):
+    """Синхронная обертка для запуска в потоке"""
+    log_message(f"🔄 Запуск команды {command} в отдельном потоке...")
+    return send_server_command(command)
+
 @bot.tree.command(name="run", description="Запустить сервер")
 async def run(interaction: discord.Interaction):
     """Запускает сервер"""
+    
+    log_message(f"📩 Получена команда /run от {interaction.user.name}")
     
     await interaction.response.defer(ephemeral=True)
     
     embed = discord.Embed(
         title="🔄 Запуск сервера",
-        description="Пожалуйста, подождите...",
+        description="Пожалуйста, подождите...\n(смотрите консоль бота для деталей)",
         color=discord.Color.orange(),
         timestamp=datetime.now()
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
     
-    # ЗАПУСКАЕМ СЕРВЕР (КАК В THONNY)
-    success, message = send_server_command("start")
+    # Запускаем в отдельном потоке чтобы не блокировать бота
+    loop = asyncio.get_event_loop()
+    success, message = await loop.run_in_executor(None, run_server_command_sync, "start")
     
     embed = discord.Embed(
         title="🟢 Запуск сервера" if success else "⚠️ Ошибка",
@@ -228,22 +280,26 @@ async def run(interaction: discord.Interaction):
     )
     
     await interaction.edit_original_response(embed=embed)
+    log_message(f"✅ Команда /run завершена для {interaction.user.name}")
 
 @bot.tree.command(name="stop", description="Остановить сервер")
 async def stop(interaction: discord.Interaction):
     """Останавливает сервер"""
     
+    log_message(f"📩 Получена команда /stop от {interaction.user.name}")
+    
     await interaction.response.defer(ephemeral=True)
     
     embed = discord.Embed(
         title="🔄 Остановка сервера",
-        description="Пожалуйста, подождите...",
+        description="Пожалуйста, подождите...\n(смотрите консоль бота для деталей)",
         color=discord.Color.orange(),
         timestamp=datetime.now()
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
     
-    success, message = send_server_command("stop")
+    loop = asyncio.get_event_loop()
+    success, message = await loop.run_in_executor(None, run_server_command_sync, "stop")
     
     embed = discord.Embed(
         title="🔴 Остановка сервера" if success else "⚠️ Ошибка",
@@ -257,22 +313,26 @@ async def stop(interaction: discord.Interaction):
     )
     
     await interaction.edit_original_response(embed=embed)
+    log_message(f"✅ Команда /stop завершена для {interaction.user.name}")
 
 @bot.tree.command(name="restart", description="Перезапустить сервер")
 async def restart(interaction: discord.Interaction):
     """Перезапускает сервер"""
     
+    log_message(f"📩 Получена команда /restart от {interaction.user.name}")
+    
     await interaction.response.defer(ephemeral=True)
     
     embed = discord.Embed(
         title="🔄 Перезапуск сервера",
-        description="Пожалуйста, подождите...",
+        description="Пожалуйста, подождите...\n(смотрите консоль бота для деталей)",
         color=discord.Color.orange(),
         timestamp=datetime.now()
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
     
-    success, message = send_server_command("restart")
+    loop = asyncio.get_event_loop()
+    success, message = await loop.run_in_executor(None, run_server_command_sync, "restart")
     
     embed = discord.Embed(
         title="🔄 Перезапуск сервера" if success else "⚠️ Ошибка",
@@ -286,6 +346,7 @@ async def restart(interaction: discord.Interaction):
     )
     
     await interaction.edit_original_response(embed=embed)
+    log_message(f"✅ Команда /restart завершена для {interaction.user.name}")
 
 @bot.tree.command(name="info", description="Информация о боте")
 async def info(interaction: discord.Interaction):
@@ -321,8 +382,10 @@ async def info(interaction: discord.Interaction):
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
-    print("🚀 Запуск бота...")
+    log_message("🚀 ЗАПУСК БОТА")
+    log_message("="*50)
+    
     try:
         bot.run(DISCORD_TOKEN)
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        log_message(f"❌ Ошибка: {e}")
