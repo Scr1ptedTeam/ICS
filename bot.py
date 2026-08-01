@@ -8,8 +8,6 @@ import urllib3
 import websocket
 import time
 import asyncio
-import subprocess
-import sys
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -57,36 +55,125 @@ HEADERS = {
 
 SERVER_ID = "6952da89-092d-410b-be22-d2e4efd713f0"
 
-# ========== ФУНКЦИЯ ЗАПУСКА СКРИПТА ==========
+# ========== ФУНКЦИИ ДЛЯ ЗАПУСКА СЕРВЕРА ==========
 
-def run_start_script():
-    """Запускает run.py как отдельный процесс для запуска сервера"""
-    
+def accept_eula():
+    """Принимает EULA"""
     try:
-        # Получаем путь к текущему скрипту
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(current_dir, 'run.py')
+        session = requests.Session()
+        session.cookies.update(COOKIES)
         
-        # Проверяем, существует ли файл
-        if not os.path.exists(script_path):
-            return False, "❌ Файл run.py не найден!"
+        response = session.get('https://panel.incloudgame.ru', headers=HEADERS, timeout=10, verify=False)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        csrf_token = None
         
-        # Запускаем run.py как отдельный процесс
-        # Используем тот же интерпретатор Python
-        result = subprocess.run(
-            [sys.executable, script_path],
-            capture_output=True,
-            text=True,
-            timeout=30
+        meta = soup.find('meta', {'name': 'csrf-token'})
+        if meta and meta.get('content'):
+            csrf_token = meta.get('content')
+        
+        if not csrf_token:
+            csrf_token = session.cookies.get('XSRF-TOKEN')
+        
+        if not csrf_token:
+            return False
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://panel.incloudgame.ru',
+            'X-CSRF-TOKEN': csrf_token,
+            'Referer': f'https://panel.incloudgame.ru/server/{SERVER_ID}/files',
+        }
+        
+        response = session.post(
+            f'https://panel.incloudgame.ru/api/client/servers/{SERVER_ID}/files/write',
+            params={"file": "eula.txt"},
+            data="eula=true",
+            headers=headers,
+            timeout=10,
+            verify=False
         )
         
-        if result.returncode == 0:
-            return True, f"✅ Скрипт выполнен успешно!\n```\n{result.stdout[:500]}\n```"
-        else:
-            return False, f"❌ Ошибка выполнения:\n```\n{result.stderr[:500]}\n```"
-            
-    except subprocess.TimeoutExpired:
-        return False, "⏰ Скрипт выполнялся слишком долго (таймаут 30 сек)"
+        return response.status_code in [200, 201, 204]
+    except:
+        return False
+
+def get_websocket_token():
+    """Получает WebSocket токен"""
+    session = requests.Session()
+    session.cookies.update(COOKIES)
+    
+    headers = HEADERS.copy()
+    headers['X-CSRF-TOKEN'] = COOKIES.get('XSRF-TOKEN', '')
+    
+    try:
+        response = session.get(
+            f'https://panel.incloudgame.ru/api/client/servers/{SERVER_ID}/websocket',
+            headers=headers,
+            timeout=10,
+            verify=False
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get('data', {}).get('token')
+            socket_url = data.get('data', {}).get('socket')
+            session.cookies.update(COOKIES)
+            return token, socket_url, session.cookies
+        return None, None, None
+    except:
+        return None, None, None
+
+def send_server_command(command):
+    """Отправляет команду на сервер (работает как в Thonny)"""
+    
+    try:
+        if command == "start":
+            accept_eula()
+            time.sleep(1)
+        
+        ws_token, ws_url, cookies = get_websocket_token()
+        if not ws_token:
+            return False, "❌ Не удалось получить токен"
+        
+        cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+        headers = [
+            f"User-Agent: {HEADERS['User-Agent']}",
+            "Origin: https://panel.incloudgame.ru",
+            f"Cookie: {cookie_string}",
+            "X-CSRF-TOKEN: " + COOKIES.get('XSRF-TOKEN', ''),
+        ]
+        
+        ws = websocket.create_connection(
+            ws_url,
+            header=headers,
+            timeout=15,
+            sslopt={"cert_reqs": 0},
+            origin="https://panel.incloudgame.ru"
+        )
+        
+        ws.send(json.dumps({"event": "auth", "args": [ws_token]}))
+        time.sleep(1)
+        
+        try:
+            response = ws.recv()
+            if "auth success" not in response:
+                ws.close()
+                return False, "❌ Ошибка аутентификации"
+        except:
+            ws.close()
+            return False, "❌ Нет ответа от сервера"
+        
+        ws.send(json.dumps({
+            "event": "set state",
+            "args": [command]
+        }))
+        
+        time.sleep(2)
+        ws.close()
+        
+        return True, f"✅ Команда '{command}' отправлена!"
+        
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -108,29 +195,29 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="/run | /stop"
+            name="/run | /stop | /restart"
         )
     )
 
-@bot.tree.command(name="run", description="Запустить сервер (выполнить run.py)")
+@bot.tree.command(name="run", description="Запустить сервер")
 async def run(interaction: discord.Interaction):
-    """Запускает run.py для старта сервера"""
+    """Запускает сервер"""
     
     await interaction.response.defer(ephemeral=True)
     
     embed = discord.Embed(
-        title="🔄 Запуск скрипта run.py",
+        title="🔄 Запуск сервера",
         description="Пожалуйста, подождите...",
         color=discord.Color.orange(),
         timestamp=datetime.now()
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
     
-    # Запускаем скрипт
-    success, message = run_start_script()
+    # ЗАПУСКАЕМ СЕРВЕР (КАК В THONNY)
+    success, message = send_server_command("start")
     
     embed = discord.Embed(
-        title="✅ Запуск выполнен" if success else "❌ Ошибка",
+        title="🟢 Запуск сервера" if success else "⚠️ Ошибка",
         description=message,
         color=discord.Color.green() if success else discord.Color.red(),
         timestamp=datetime.now()
@@ -144,12 +231,19 @@ async def run(interaction: discord.Interaction):
 
 @bot.tree.command(name="stop", description="Остановить сервер")
 async def stop(interaction: discord.Interaction):
-    """Останавливает сервер через WebSocket"""
+    """Останавливает сервер"""
     
     await interaction.response.defer(ephemeral=True)
     
-    # Тут ваш код остановки через WebSocket
-    success, message = True, "✅ Команда остановки отправлена!"
+    embed = discord.Embed(
+        title="🔄 Остановка сервера",
+        description="Пожалуйста, подождите...",
+        color=discord.Color.orange(),
+        timestamp=datetime.now()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    success, message = send_server_command("stop")
     
     embed = discord.Embed(
         title="🔴 Остановка сервера" if success else "⚠️ Ошибка",
@@ -161,7 +255,37 @@ async def stop(interaction: discord.Interaction):
         text=f"Запросил: {interaction.user.display_name}",
         icon_url=interaction.user.avatar.url if interaction.user.avatar else None
     )
+    
+    await interaction.edit_original_response(embed=embed)
+
+@bot.tree.command(name="restart", description="Перезапустить сервер")
+async def restart(interaction: discord.Interaction):
+    """Перезапускает сервер"""
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    embed = discord.Embed(
+        title="🔄 Перезапуск сервера",
+        description="Пожалуйста, подождите...",
+        color=discord.Color.orange(),
+        timestamp=datetime.now()
+    )
     await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    success, message = send_server_command("restart")
+    
+    embed = discord.Embed(
+        title="🔄 Перезапуск сервера" if success else "⚠️ Ошибка",
+        description=message,
+        color=discord.Color.blue() if success else discord.Color.red(),
+        timestamp=datetime.now()
+    )
+    embed.set_footer(
+        text=f"Запросил: {interaction.user.display_name}",
+        icon_url=interaction.user.avatar.url if interaction.user.avatar else None
+    )
+    
+    await interaction.edit_original_response(embed=embed)
 
 @bot.tree.command(name="info", description="Информация о боте")
 async def info(interaction: discord.Interaction):
@@ -173,8 +297,9 @@ async def info(interaction: discord.Interaction):
     
     embed.add_field(
         name="📝 Команды",
-        value="`/run` - Запустить сервер (выполняет run.py)\n"
+        value="`/run` - Запустить сервер\n"
               "`/stop` - Остановить сервер\n"
+              "`/restart` - Перезапустить сервер\n"
               "`/info` - Информация о боте",
         inline=False
     )
