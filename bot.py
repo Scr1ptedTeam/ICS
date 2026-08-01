@@ -152,7 +152,7 @@ def get_websocket_token():
         return None, None, None
 
 def send_server_command(command):
-    """Отправляет команду на сервер с логами"""
+    """Отправляет команду на сервер с логами и увеличенным таймаутом"""
     
     log_message(f"🚀 Отправка команды: {command}")
     
@@ -177,10 +177,12 @@ def send_server_command(command):
         ]
         
         log_message("🔗 Подключаемся к WebSocket...")
+        
+        # УВЕЛИЧИВАЕМ ТАЙМАУТ ДО 30 СЕКУНД
         ws = websocket.create_connection(
             ws_url,
             header=headers,
-            timeout=15,
+            timeout=30,  # ← УВЕЛИЧЕНО С 15 ДО 30
             sslopt={"cert_reqs": 0},
             origin="https://panel.incloudgame.ru"
         )
@@ -188,7 +190,7 @@ def send_server_command(command):
         
         log_message("🔑 Отправляем аутентификацию...")
         ws.send(json.dumps({"event": "auth", "args": [ws_token]}))
-        time.sleep(1)
+        time.sleep(2)  # ← УВЕЛИЧЕНО С 1 ДО 2
         
         try:
             response = ws.recv()
@@ -209,12 +211,15 @@ def send_server_command(command):
             "args": [command]
         }))
         
-        time.sleep(2)
+        time.sleep(3)  # ← УВЕЛИЧЕНО С 2 ДО 3
         ws.close()
         log_message("✅ Соединение закрыто")
         
         return True, f"✅ Команда '{command}' отправлена!"
         
+    except websocket.WebSocketTimeoutException:
+        log_message("❌ Таймаут WebSocket!")
+        return False, "❌ Таймаут подключения к WebSocket. Попробуйте ещё раз."
     except Exception as e:
         log_message(f"❌ Ошибка: {e}")
         return False, f"❌ Ошибка: {str(e)}"
@@ -241,8 +246,6 @@ async def on_ready():
         )
     )
 
-# ========== ЗАПУСК В ОТДЕЛЬНОМ ПОТОКЕ ==========
-
 def run_server_command_sync(command):
     """Синхронная обертка для запуска в потоке"""
     log_message(f"🔄 Запуск команды {command} в отдельном потоке...")
@@ -264,7 +267,6 @@ async def run(interaction: discord.Interaction):
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
     
-    # Запускаем в отдельном потоке чтобы не блокировать бота
     loop = asyncio.get_event_loop()
     success, message = await loop.run_in_executor(None, run_server_command_sync, "start")
     
