@@ -376,7 +376,7 @@ async def info(interaction: discord.Interaction):
     session_status = "✅ Активна" if check_session() else "❌ Истекла"
     
     embed = discord.Embed(
-        title="🤖 Информация о боте",
+        title="🤖 Информация о боте (V1.5)",
         color=discord.Color.purple(),
         timestamp=datetime.now()
     )
